@@ -6,6 +6,13 @@ R + Quarto project: statistical analyses and manuscript figures for *Modelling t
 
 Kiran Jonathan Horrocks<sup>1,2,*</sup>, Adriana Najar-Rodriguez<sup>3</sup>, Rachael Horner<sup>3</sup>, Gonzalo Andres Avila<sup>2,4</sup>, Gregory Ian Holwell<sup>1</sup>, David Maxwell Suckling<sup>1,3,4,+</sup>, Thomas Peter Moore<sup>3</sup>, Lloyd Damien Stringer<sup>3,4</sup>
 
+1. School of Biological Sciences, University of Auckland, Private Bag 92019, Auckland Mail Centre, Auckland, 1142, New Zealand  
+2. The New Zealand Institute for Plant and Food Research Limited, Private Bag 92169 Auckland Mail Centre, Auckland, 1025, New Zealand  
+3. The New Zealand Institute for Plant and Food Research Limited, Private Bag 4704, Christchurch Mail Centre, Christchurch, 8140, New Zealand  
+4. Better Border Biosecurity, Auckland, New Zealand  
+
+\* *Corresponding author* · + *Additional role (see manuscript)*
+
 ## Folder structure
 
 ```text
