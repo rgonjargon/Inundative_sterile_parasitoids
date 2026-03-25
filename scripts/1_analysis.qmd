@@ -1,0 +1,1460 @@
+---
+title: "Modelling the impact of inundative sterile parasitoids and SIT as a novel combination for insect pest eradication"
+subtitle: "*Document structure and formatting were assisted with Cursor.*"
+author: "Dr Tom Moore - Statistical Scientist"
+date: "`r Sys.Date()`"
+format:
+  html:
+    include-in-header:
+      text: |
+        <style>
+        .quarto-title .subtitle,
+        p.subtitle,
+        .subtitle.lead {
+          font-size: 0.88rem;
+          font-weight: normal;
+        }
+        </style>
+    code-fold: false
+    toc: true
+    toc-float: true
+    toc-depth: 5
+    theme: united
+    highlight-style: tango
+    fig-width: 9
+    fig-height: 6
+    df-print: paged
+    fig-dpi: 600
+    embed-resources: true
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+```{r}
+#| label: setup-packages
+#| include: false
+
+# Project root is resolved with `here` (see .here at repo root). Minimal dependencies for
+# this document: GLMMs (lme4, glmmTMB), effects plots (effects), diagnostics (performance), contrasts
+# (emmeans), Excel reads (readxl), cleaning (janitor), ggplot/tidy data (tidyverse), HTML tables
+# (kableExtra). Figures are written under outputs/plots via ggsave in the figure chunks below.
+
+ipak <- function(pkg) {
+  new.pkg <- pkg[!(pkg %in% installed.packages()[,"Package"])]
+  if (length(new.pkg)) {
+    install.packages(new.pkg, dependencies = TRUE)
+    cat("Not Installed:", paste(new.pkg, collapse = ", "), "\n")
+  } else {
+    cat("All Packages Installed :) \n")
+  }
+  invisible(sapply(pkg, require, character.only = TRUE))
+}
+
+packages <- c(
+  "tidyverse", "readxl", "janitor", "lme4", "glmmTMB", "effects",
+  "performance", "emmeans", "here", "MuMIn", "kableExtra"
+)
+ipak(packages)
+```
+
+```{r}
+#| label: setup-wd
+#| include: false
+
+# Uncomment for strict here() resolution from this file:
+# here::i_am("scripts/1_analysis.qmd")
+
+dir.create(here::here("outputs/plots"), recursive = TRUE, showWarnings = FALSE)
+
+# Models tab (all figures): AICc (1 dp), response (family + link), df, formula; sorted by AICc
+models_aicc_table_with_response <- function(...) {
+  objs <- Filter(Negate(is.null), list(...))
+  if (!length(objs)) {
+    stop("No non-NULL models passed to models_aicc_table_with_response")
+  }
+  aicc <- vapply(objs, MuMIn::AICc, numeric(1))
+  npar <- vapply(objs, function(m) attr(stats::logLik(m), "df"), numeric(1))
+  frml <- vapply(objs, function(m) {
+    paste(deparse(stats::formula(m), width.cutoff = 500), collapse = " ")
+  }, character(1))
+  resp <- vapply(objs, function(m) {
+    fam <- tryCatch(stats::family(m), error = function(e) NULL)
+    if (is.null(fam)) {
+      return("—")
+    }
+    ff <- fam$family
+    lk <- fam$link
+    # glmer.nb: fam$family is like "Negative Binomial(9.416)" — θ is the fitted NB parameter, not part of the link
+    if (is.character(ff) && grepl("^Negative Binomial\\(", ff)) {
+      ff <- "negative binomial"
+    }
+    paste0(ff, " (", lk, ")")
+  }, character(1))
+  ord <- order(aicc)
+  tab <- data.frame(
+    AICc = round(aicc[ord], 1),
+    response = resp[ord],
+    df = as.integer(round(npar[ord])),
+    `model formula` = frml[ord],
+    check.names = FALSE,
+    stringsAsFactors = FALSE
+  )
+  rownames(tab) <- NULL
+  tab
+}
+
+# Styled HTML table: small font.
+# highlight_row: single row index to highlight; if NULL and fallback_best_aicc, highlights row 1 (lowest AICc after sorting).
+kable_models_aicc_html <- function(tab, highlight_row = NULL, fallback_best_aicc = TRUE) {
+  kb <- knitr::kable(tab, format = "html", escape = FALSE)
+  kb <- kableExtra::kable_styling(
+    kb,
+    full_width = FALSE,
+    bootstrap_options = c("striped", "hover"),
+    font_size = 8
+  )
+  hr <- NULL
+  if (length(highlight_row) == 1L && !is.na(highlight_row) &&
+      highlight_row >= 1L && highlight_row <= nrow(tab)) {
+    hr <- as.integer(highlight_row)
+  } else if (isTRUE(fallback_best_aicc) && nrow(tab) >= 1L) {
+    hr <- 1L
+  }
+  if (!is.null(hr)) {
+    kb <- kableExtra::row_spec(kb, hr, bold = TRUE, background = "#fff3cd")
+  }
+  kb
+}
+
+# Figure 5 table: binomial `cbind(...) ~ cage_id + (1|replicate) + (1|obs)` without egg-mass terms (m3)
+fig5_highlight_row_olre_binomial <- function(tab) {
+  f <- tab$`model formula`
+  has_rep <- grepl("(1 | replicate)", f, fixed = TRUE) | grepl("(1|replicate)", f, fixed = TRUE)
+  has_obs <- grepl("(1 | obs)", f, fixed = TRUE) | grepl("(1|obs)", f, fixed = TRUE)
+  w <- which(
+    has_rep & has_obs &
+      !grepl("total_egg_mass", f, fixed = TRUE) &
+      grepl("cbind", f, fixed = TRUE) &
+      grepl("^binomial \\(", tab$response, ignore.case = TRUE)
+  )
+  if (length(w) == 1L) w else integer(0)
+}
+
+# Figure 6 table: `no_eggs ~ cage_id + (1 | replicate)` negative binomial, no OLRE, no offset (m1)
+fig6_highlight_row_nb_replicate_only <- function(tab) {
+  f <- tab$`model formula`
+  has_rep <- grepl("(1 | replicate)", f, fixed = TRUE) | grepl("(1|replicate)", f, fixed = TRUE)
+  has_obs <- grepl("(1 | obs)", f, fixed = TRUE) | grepl("(1|obs)", f, fixed = TRUE)
+  w <- which(
+    has_rep &
+      !has_obs &
+      grepl("^negative binomial", tab$response, ignore.case = TRUE) &
+      !grepl("offset\\(", f)
+  )
+  if (length(w) == 1L) w else integer(0)
+}
+
+# Select fitted model with lowest AICc (for effects, validation, contrasts, summary)
+pick_best_by_aicc <- function(...) {
+  objs <- Filter(Negate(is.null), list(...))
+  if (!length(objs)) {
+    stop("No non-NULL models passed to pick_best_by_aicc")
+  }
+  aicc <- vapply(objs, MuMIn::AICc, numeric(1))
+  objs[[which.min(aicc)]]
+}
+
+# Text line(s) printed above validation plots
+format_model_formula <- function(m) {
+  paste(deparse(stats::formula(m), width.cutoff = 500), collapse = " ")
+}
+
+# Fallback when performance::check_model() errors (e.g. binomial cbind / glmmTMB row alignment)
+residual_fitted_diagnostic_plot <- function(m) {
+  rf <- tryCatch(
+    {
+      r <- stats::residuals(m, type = "pearson")
+      f <- stats::fitted(m)
+      if (length(r) != length(f)) {
+        NULL
+      } else {
+        data.frame(fitted = as.numeric(f), pearson_resid = as.numeric(r))
+      }
+    },
+    error = function(e) NULL
+  )
+  if (is.null(rf) || nrow(rf) == 0L) {
+    cat("*Could not build Pearson residual vs fitted fallback plot.*\n\n")
+    return(invisible(NULL))
+  }
+  print(
+    ggplot2::ggplot(rf, ggplot2::aes(x = fitted, y = pearson_resid)) +
+      ggplot2::geom_point(alpha = 0.45, na.rm = TRUE) +
+      ggplot2::geom_hline(yintercept = 0, linetype = 2, linewidth = 0.3) +
+      ggplot2::labs(
+        x = "Fitted values",
+        y = "Pearson residuals",
+        title = "Fallback diagnostic (check_model unavailable)"
+      ) +
+      ggplot2::theme_classic()
+  )
+}
+
+safe_print_check_model <- function(m) {
+  tryCatch(
+    print(performance::check_model(m)),
+    error = function(e) {
+      cat(
+        "*`performance::check_model()` failed:* ",
+        conditionMessage(e),
+        "\n\n",
+        sep = ""
+      )
+      residual_fitted_diagnostic_plot(m)
+    }
+  )
+}
+
+# performance::check_model() for every named candidate (NULL → short note; use results: asis in chunk).
+# section_labels: optional named character vector (same names as ...); appended to heading after model id.
+validate_all_candidate_models <- function(..., section_labels = NULL) {
+  lst <- list(...)
+  nm <- names(lst)
+  if (is.null(nm)) nm <- rep("", length(lst))
+  for (i in seq_along(lst)) {
+    id <- if (nzchar(nm[i])) nm[i] else paste0("model_", i)
+    sub <- if (!is.null(section_labels) && id %in% names(section_labels)) {
+      section_labels[[id]]
+    } else {
+      NULL
+    }
+    heading <- if (!is.null(sub)) paste0(id, " — ", sub) else id
+    knitr::asis_output(paste0("\n\n#### ", heading, "\n\n"))
+    m <- lst[[i]]
+    if (is.null(m)) {
+      cat("*This candidate did not fit (NULL).*\n\n")
+      next
+    }
+    cat("Model formula:\n\n")
+    cat(format_model_formula(m), "\n\n")
+    safe_print_check_model(m)
+  }
+  invisible(NULL)
+}
+
+# Default plot labels for four cage levels (must match factor level order in the model)
+pairwise_cage_display_four <- c("KWT", "SIT", "CBC", "Control")
+
+# Figure 5: marginal means for cage_id (effects::allEffects for lme4/glm; emmeans for glmmTMB)
+fig5_cage_effect_df <- function(m) {
+  if (inherits(m, "glmmTMB")) {
+    e <- emmeans::emmeans(m, ~ cage_id, type = "response")
+    d <- as.data.frame(e)
+    d$fit <- d$prob
+    d$lower <- d$asymp.LCL
+    d$upper <- d$asymp.UCL
+    d
+  } else {
+    as.data.frame(effects::allEffects(m)[["cage_id"]])
+  }
+}
+
+# Modeled values matching the effect plot + cage differences on response scale (under Effect plot tab)
+kable_fig_modeled_estimates <- function(eff, cage_col, sex_col = NULL, scale_pct = FALSE) {
+  cv <- eff[[cage_col]]
+  if (!is.factor(cv)) cv <- factor(cv)
+  disp <- pairwise_cage_display_four[as.integer(cv)]
+  tab <- data.frame(
+    `Cage treatment` = disp,
+    check.names = FALSE,
+    stringsAsFactors = FALSE
+  )
+  if (!is.null(sex_col) && sex_col %in% names(eff)) {
+    tab$Sex <- stringr::str_to_title(as.character(eff[[sex_col]]))
+  }
+  mul <- if (scale_pct) 100 else 1
+  tab$Estimate <- round(eff$fit * mul, 2)
+  tab$Lower <- round(eff$lower * mul, 2)
+  tab$Upper <- round(eff$upper * mul, 2)
+  if (scale_pct) {
+    names(tab)[names(tab) == "Estimate"] <- "Estimate (%)"
+    names(tab)[names(tab) == "Lower"] <- "Lower (%)"
+    names(tab)[names(tab) == "Upper"] <- "Upper (%)"
+  }
+  kb <- knitr::kable(
+    tab,
+    format = "html",
+    digits = 2,
+    caption = "Modeled estimates (same scale as the figure, with 95% confidence intervals).",
+    escape = FALSE,
+    table.attr = "style=\"margin-left:0;margin-right:auto;\""
+  )
+  kableExtra::kable_styling(
+    kb,
+    full_width = FALSE,
+    bootstrap_options = c("striped", "hover"),
+    font_size = 10,
+    position = "left"
+  )
+}
+
+kable_cage_pairwise_response <- function(m, cage_var, caption_suffix = NULL, diff_as_pct = FALSE) {
+  form <- stats::as.formula(paste0("~ ", cage_var))
+  emm <- emmeans::emmeans(m, form, type = "response")
+  pr <- pairs(emmeans::regrid(emm, transform = "response"), reverse = TRUE)
+  d <- as.data.frame(summary(pr))
+  mf <- tryCatch(stats::model.frame(m), error = function(e) NULL)
+  if (!is.null(mf) && cage_var %in% names(mf)) {
+    x <- mf[[cage_var]]
+    if (!is.factor(x)) x <- factor(x)
+    levs <- levels(droplevels(x))
+    n <- length(levs)
+    disp <- if (n == length(pairwise_cage_display_four)) {
+      pairwise_cage_display_four
+    } else {
+      levs
+    }
+    names(disp) <- levs
+    d$contrast <- vapply(
+      strsplit(as.character(d$contrast), " - ", fixed = TRUE),
+      function(parts) {
+        mapped <- unname(disp[parts])
+        mapped[is.na(mapped)] <- parts[is.na(mapped)]
+        paste(mapped, collapse = " - ")
+      },
+      FUN.VALUE = character(1),
+      USE.NAMES = FALSE
+    )
+  }
+  if (isTRUE(diff_as_pct)) {
+    d$estimate <- d$estimate * 100
+    d$SE <- d$SE * 100
+  }
+  d$estimate <- round(d$estimate, 2)
+  d$SE <- round(d$SE, 2)
+  d$p.value <- round(d$p.value, 2)
+  cap <- if (isTRUE(diff_as_pct)) {
+    paste0(
+      "Pairwise differences between cage treatments (percentage points on modelled mortality ",
+      "probability; Tukey-adjusted p-values)."
+    )
+  } else {
+    "Pairwise differences between cage treatments (response scale; Tukey-adjusted p-values)."
+  }
+  if (!is.null(caption_suffix)) {
+    cap <- paste(cap, caption_suffix)
+  }
+  cn <- if (isTRUE(diff_as_pct)) {
+    c("Contrast", "Estimate (%)", "SE (%)", "p")
+  } else {
+    c("Contrast", "Estimate", "SE", "p")
+  }
+  kb <- knitr::kable(
+    d[c("contrast", "estimate", "SE", "p.value")],
+    format = "html",
+    digits = c(NA, 2, 2, 2),
+    caption = cap,
+    col.names = cn,
+    escape = FALSE,
+    table.attr = "style=\"margin-left:0;margin-right:auto;\""
+  )
+  kableExtra::kable_styling(
+    kb,
+    full_width = FALSE,
+    bootstrap_options = c("striped", "hover"),
+    font_size = 10,
+    position = "left"
+  )
+}
+
+# Figure 5: caterpillar-style random effects (lme4 plot method; ggplot for glmmTMB)
+print_fig5_random_effects <- function(m) {
+  if (inherits(m, "glmmTMB")) {
+    re <- lme4::ranef(m, condVar = TRUE)
+    if (!length(re$cond)) {
+      cat("No conditional random effects in this glmmTMB fit.\n")
+      return(invisible(NULL))
+    }
+    for (nm in names(re$cond)) {
+      bl <- re$cond[[nm]]
+      cv <- attr(bl, "condVar")
+      if (nrow(bl) == 1L && ncol(bl) > 1L) {
+        # e.g. AR(1): one row, one column per sequential batch level (wide matrix)
+        est <- as.numeric(bl[1, , drop = TRUE])
+        lvl <- colnames(bl)
+        se <- if (!is.null(cv) && length(dim(cv)) == 3L && dim(cv)[1L] > 1L) {
+          sqrt(diag(cv[, , 1L]))
+        } else {
+          rep(NA_real_, length(est))
+        }
+        rdf <- data.frame(level = lvl, estimate = est, se = se)
+      } else {
+        se <- if (!is.null(cv) && length(dim(cv)) == 3L) sqrt(cv[1, 1, ]) else rep(NA_real_, nrow(bl))
+        rdf <- data.frame(level = rownames(bl), estimate = bl[[1]], se = se)
+      }
+      p <- ggplot2::ggplot(rdf, ggplot2::aes(x = reorder(level, estimate), y = estimate)) +
+        ggplot2::geom_point() +
+        ggplot2::geom_errorbar(
+          ggplot2::aes(ymin = estimate - 1.96 * se, ymax = estimate + 1.96 * se),
+          width = 0.2
+        ) +
+        ggplot2::coord_flip() +
+        ggplot2::labs(title = paste0("Random effects: ", nm), x = NULL, y = "BLUP (link scale)")
+      print(p)
+    }
+  } else if (inherits(m, "merMod")) {
+    print(plot(lme4::ranef(m, condVar = TRUE)))
+  } else {
+    cat("No random effects in the selected model (fixed-effects GLM).\n")
+  }
+}
+```
+
+This document is **supporting information** for the paper *Modelling the impact of inundative sterile parasitoids and SIT as a novel combination for insect pest eradication*.
+
+# Methods
+
+## Statistical Analyses
+Frequentist analyses in R (R Core Team, 2022) used **`glm`** and **`lme4`** mixed models (`glmer`, `glmer.nb`). **Diagnostics** came before **AICc** (Burnham & Anderson, 2002): a model was not chosen on **AICc** alone if **performance** checks were poor. **AICc** for **Figures 5–8** is in each Models tab. Usually the lowest-AICc **adequate** fit drives plots and tables; **Figures 5–6** instead use **fixed** reporting models (below).
+
+**Checks:** `performance::check_model()` (Lüdecke et al., 2021), or residual–vs–fitted fallback. Validation runs on the fixed fits for **5–6** and on **every** candidate for **7–8**.
+
+**Presentation:** Factor A–D → **KWT, SIT, CBC, Control**. Effect means: **`effects`** (Fox & Weisberg, 2019). Cage **pairwise** contrasts on the **response** scale: **`emmeans`**, Tukey adjustment (Lenth, 2024). **`ggplot2`** (Wickham, 2016).
+
+- **Figure 5** — Binomial F1 mortality; replicate, **`(1|obs)`** (overdispersion), optional egg mass. **Fixed report model:** **`cbind(f1_not_emerged, no_eggs) ~ cage_id + (1|replicate) + (1|obs)`** (m3).
+- **Figure 6** — Negative binomial egg counts; OLRE/offset variants compared. **Fixed report model:** **`no_eggs ~ cage_id + (1|replicate)`** (m1).
+- **Figures 7–8** — Poisson adult mortality: cage, `+ sex`, `× sex`; lowest AICc for outputs.
+- **Figures 9–10** — Descriptive plots only.
+
+# Figure 5
+
+**Wrangling & Summary**
+
+```{r}
+#| label: fig5-wrangling
+
+# Read and prepare data for Figure 5
+df_f5 <- read_excel(here::here("analysis/data/Cages datasheet actual.xlsx"),
+                    sheet = "F1 egg mortality data") |>
+  janitor::clean_names() |>
+  mutate(replicate = replicate_2)|>
+  group_by(cage_id, replicate) |>
+  mutate(total_egg_mass = max(egg_mass)) |>
+  ungroup() |>
+  mutate(cage_id = as.factor(cage_id),
+         replicate = as.factor(replicate),
+         no_eggs = ifelse(f1_not_emerged == 0, 0, no_eggs),
+         ) |>
+  select(cage_id, replicate, total_egg_mass, f1_not_emerged, no_eggs) |>
+  mutate(obs = factor(row_number()))
+
+# Check data structure (tibble summary: rows × cols, classes, column types)
+str(as_tibble(df_f5), vec.len = 2)
+```
+
+```{r}
+#| label: fig5-models-run
+#| include: false
+
+# Fit models for Figure 5 (runs before Effect plot tab; shown again under Models tab)
+fit_f5 <- function(expr, id) {
+  tryCatch(expr, error = function(e) {
+    warning("Figure 5 model ", id, " failed to fit: ", conditionMessage(e))
+    NULL
+  })
+}
+
+m1 <- glm(cbind(f1_not_emerged, no_eggs) ~ cage_id, family = binomial(link = "logit"), data = df_f5)
+m2 <- glmer(cbind(f1_not_emerged, no_eggs) ~ cage_id + (1|replicate), family = binomial(link = "logit"), data = df_f5)
+# m3–m5: replicate + OLRE; variants with total egg mass (same random structure)
+m3 <- glmer(cbind(f1_not_emerged, no_eggs) ~ cage_id + (1|replicate) + (1|obs), family = binomial(link = "logit"), data = df_f5)
+m4 <- glmer(cbind(f1_not_emerged, no_eggs) ~ cage_id + total_egg_mass + (1|replicate) + (1|obs), family = binomial(link = "logit"), data = df_f5)
+m5 <- fit_f5(
+  glmer(
+    cbind(f1_not_emerged, no_eggs) ~ cage_id * total_egg_mass + (1|replicate) + (1|obs),
+    family = binomial(link = "logit"),
+    data = df_f5
+  ),
+  "m5"
+)
+
+m_best <- pick_best_by_aicc(m1, m2, m3, m4, m5)
+# Reporting model: binomial GLMM m3 — `cbind(f1_not_emerged, no_eggs) ~ cage_id + (1|replicate) + (1|obs)`
+m_fig5 <- if (!is.null(m3)) m3 else if (!is.null(m2)) {
+  warning("Figure 5: m3 (binomial OLRE) is NULL; using m2 for reporting.")
+  m2
+} else {
+  warning("Figure 5: using m1 for reporting.")
+  m1
+}
+```
+
+::: {.panel-tabset}
+## Effect plot
+```{r}
+#| label: fig5-effects
+#| fig-width: 5
+#| fig-height: 4
+#| dpi: 600
+
+# Generate and plot effects for Figure 5 (m_fig5: binomial m3, replicate + OLRE)
+eff <- fig5_cage_effect_df(m_fig5)
+
+# Create plot
+p_fig5 <- ggplot() +
+  theme_classic() +
+  geom_jitter(data = df_f5 %>%
+  mutate(prop = ifelse(is.nan(f1_not_emerged/no_eggs), 0, f1_not_emerged/no_eggs)),
+               aes(x = cage_id, y = prop),
+              alpha = 0.14, width = 0.2, color = "grey30") +
+  geom_point(data = eff,
+              aes(x = cage_id, y = fit), size = 2) +
+  geom_errorbar(data = eff,
+    aes(x = cage_id, ymin = lower, ymax = upper), size = 1, width = 0.3) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  scale_x_discrete(labels = c("KWT", "SIT", "CBC", "Control")) +
+  labs(x = "Cage treatment", y = "Percentage F1 egg mortality")
+
+ggsave(
+  filename = here::here("outputs/plots", "fig5.png"),
+  plot = p_fig5,
+  width = knitr::opts_current$get("fig.width"),
+  height = knitr::opts_current$get("fig.height"),
+  dpi = 600
+)
+p_fig5
+```
+
+### Modeled estimates and pairwise differences
+
+```{r}
+#| label: fig5-contrasts
+#| results: asis
+
+# Figure 5: modeled estimates (figure scale) and pairwise cage differences (response scale)
+knitr::asis_output('<div style="text-align:left;">\n')
+print(kable_fig_modeled_estimates(fig5_cage_effect_df(m_fig5), "cage_id", scale_pct = TRUE))
+print(kable_cage_pairwise_response(m_fig5, "cage_id", diff_as_pct = TRUE))
+knitr::asis_output('</div>\n')
+```
+
+## Models
+```{r}
+#| label: fig5-models
+#| eval: false
+
+# Fit models for Figure 5
+m1 <- glm(cbind(f1_not_emerged, no_eggs) ~ cage_id, family = binomial(link = "logit"), data = df_f5)
+m2 <- glmer(cbind(f1_not_emerged, no_eggs) ~ cage_id + (1|replicate), family = binomial(link = "logit"), data = df_f5)
+m3 <- glmer(cbind(f1_not_emerged, no_eggs) ~ cage_id + (1|replicate) + (1|obs), family = binomial(link = "logit"), data = df_f5)
+m4 <- glmer(cbind(f1_not_emerged, no_eggs) ~ cage_id + total_egg_mass + (1|replicate) + (1|obs), family = binomial(link = "logit"), data = df_f5)
+m5 <- glmer(cbind(f1_not_emerged, no_eggs) ~ cage_id * total_egg_mass + (1|replicate) + (1|obs), family = binomial(link = "logit"), data = df_f5)
+m_best <- pick_best_by_aicc(m1, m2, m3, m4, m5)
+m_fig5 <- if (!is.null(m3)) m3 else if (!is.null(m2)) m2 else m1
+
+# Model selection
+tab_f5 <- models_aicc_table_with_response(m1, m2, m3, m4, m5)
+hr_f5_tab <- fig5_highlight_row_olre_binomial(tab_f5)
+print(kable_models_aicc_html(
+  tab_f5,
+  highlight_row = if (length(hr_f5_tab) == 1L) hr_f5_tab else NULL,
+  fallback_best_aicc = FALSE
+))
+```
+
+```{r}
+#| label: fig5-models-output
+#| results: asis
+
+tab_f5 <- models_aicc_table_with_response(m1, m2, m3, m4, m5)
+hr_f5_tab <- fig5_highlight_row_olre_binomial(tab_f5)
+print(kable_models_aicc_html(
+  tab_f5,
+  highlight_row = if (length(hr_f5_tab) == 1L) hr_f5_tab else NULL,
+  fallback_best_aicc = FALSE
+))
+```
+
+## Validation
+```{r}
+#| label: fig5-validation
+#| fig-width: 10
+#| fig-height: 10
+#| results: asis
+
+# Reporting model m3: binomial (logit) `cbind(f1_not_emerged, no_eggs) ~ cage_id + (1|replicate) + (1|obs)`
+validate_all_candidate_models(
+  m3 = m3,
+  section_labels = c(m3 = "conditional **binomial** (logit link); `lme4::glmer`")
+)
+```
+
+## Output
+```{r}
+#| label: fig5-output
+
+# Model summary for Figure 5 (m_fig5: binomial m3, replicate + OLRE)
+summary(m_fig5)
+```
+
+## Random effects
+```{r}
+#| label: fig5-random
+
+# Random effects for m_fig5 (replicate + observation-level, binomial glmer)
+print_fig5_random_effects(m_fig5)
+```
+:::
+
+# Figure 6
+
+**Wrangling & Summary**
+
+```{r}
+#| label: fig6-wrangling
+
+# Read and prepare data for Figure 6
+df_f6 <- read_excel(here::here("analysis/data/Cages datasheet actual.xlsx"),
+                    sheet = "F1 egg mortality data") |>
+  janitor::clean_names() |>
+  mutate(replicate = replicate_2)|>
+  select(cage_id, replicate, no_eggs) |>
+  mutate(cage_id = as.factor(cage_id),
+         replicate = as.factor(replicate),
+         obs = factor(row_number()))
+
+# Check data structure
+str(df_f6)
+```
+
+```{r}
+#| label: fig6-models-run
+#| include: false
+
+# Fit models for Figure 6 (runs before Effect plot tab; shown again under Models tab)
+fit_f6 <- function(expr, id) {
+  tryCatch(expr, error = function(e) {
+    warning("Figure 6 model ", id, " failed to fit: ", conditionMessage(e))
+    NULL
+  })
+}
+
+# m1–m2: negative binomial; m3–m4: same + offset(log(pmax(no_eggs, 1))) (not stored in tibble)
+m1 <- glmer.nb(no_eggs ~ cage_id + (1|replicate), data = df_f6)
+m2 <- fit_f6(
+  glmer.nb(no_eggs ~ cage_id + (1|replicate) + (1|obs), data = df_f6),
+  "m2"
+)
+m3 <- fit_f6(
+  glmer.nb(
+    no_eggs ~ cage_id + (1|replicate) + offset(log(pmax(as.numeric(no_eggs), 1))),
+    data = df_f6
+  ),
+  "m3"
+)
+m4 <- fit_f6(
+  glmer.nb(
+    no_eggs ~ cage_id + (1|replicate) + (1|obs) + offset(log(pmax(as.numeric(no_eggs), 1))),
+    data = df_f6
+  ),
+  "m4"
+)
+
+m_best <- pick_best_by_aicc(m1, m2, m3, m4)
+# Reporting model: NB GLMM m1 — no_eggs ~ cage_id + (1|replicate)
+m_fig6 <- m1
+```
+
+::: {.panel-tabset}
+## Effect plot
+```{r}
+#| label: fig6-effects
+#| fig-width: 5
+#| fig-height: 4
+#| dpi: 600
+
+# Generate and plot effects for Figure 6 (m_fig6 = m1: replicate random intercept only)
+eff <- as.data.frame(
+  effects::allEffects(m_fig6,
+                      )[["cage_id"]])
+
+# Create plot
+p_fig6 <- ggplot() +
+  theme_classic() +
+  geom_jitter(data = df_f6,
+              aes(x = cage_id, y = no_eggs),
+              alpha = 0.14, width = 0.2, color = "grey30") +
+  geom_point(data = eff,
+             aes(x = cage_id, y = fit), size = 2) +
+  geom_errorbar(data = eff,
+    aes(x = cage_id, ymin = lower, ymax = upper), size = 1, width = 0.3) +
+  scale_y_continuous(limits = c(0,100)) +
+  scale_x_discrete(labels = c("KWT", "SIT", "CBC", "Control")) +
+  labs(x = "Cage treatment", y = "Eggs per mass")
+
+ggsave(
+  filename = here::here("outputs/plots", "fig6.png"),
+  plot = p_fig6,
+  width = knitr::opts_current$get("fig.width"),
+  height = knitr::opts_current$get("fig.height"),
+  dpi = 600
+)
+p_fig6
+```
+
+### Modeled estimates and pairwise differences
+
+```{r}
+#| label: fig6-contrasts
+#| results: asis
+
+# Figure 6: modeled estimates (figure scale) and pairwise cage differences (response scale)
+knitr::asis_output('<div style="text-align:left;">\n')
+eff_f6_tab <- as.data.frame(effects::allEffects(m_fig6)[["cage_id"]])
+print(kable_fig_modeled_estimates(eff_f6_tab, "cage_id", scale_pct = FALSE))
+print(kable_cage_pairwise_response(m_fig6, "cage_id"))
+knitr::asis_output('</div>\n')
+```
+
+## Models
+```{r}
+#| label: fig6-models
+#| eval: false
+
+# Fit models for Figure 6
+m1 <- glmer.nb(no_eggs ~ cage_id + (1|replicate), data = df_f6)
+m2 <- glmer.nb(no_eggs ~ cage_id + (1|replicate) + (1|obs), data = df_f6)
+m3 <- glmer.nb(
+  no_eggs ~ cage_id + (1|replicate) + offset(log(pmax(as.numeric(no_eggs), 1))),
+  data = df_f6
+)
+m4 <- glmer.nb(
+  no_eggs ~ cage_id + (1|replicate) + (1|obs) + offset(log(pmax(as.numeric(no_eggs), 1))),
+  data = df_f6
+)
+m_best <- pick_best_by_aicc(m1, m2, m3, m4)
+m_fig6 <- m1
+
+# Model selection
+tab_f6 <- models_aicc_table_with_response(m1, m2, m3, m4)
+hr_f6_tab <- fig6_highlight_row_nb_replicate_only(tab_f6)
+print(kable_models_aicc_html(
+  tab_f6,
+  highlight_row = if (length(hr_f6_tab) == 1L) hr_f6_tab else NULL,
+  fallback_best_aicc = FALSE
+))
+```
+
+```{r}
+#| label: fig6-models-output
+#| results: asis
+
+tab_f6 <- models_aicc_table_with_response(m1, m2, m3, m4)
+hr_f6_tab <- fig6_highlight_row_nb_replicate_only(tab_f6)
+print(kable_models_aicc_html(
+  tab_f6,
+  highlight_row = if (length(hr_f6_tab) == 1L) hr_f6_tab else NULL,
+  fallback_best_aicc = FALSE
+))
+```
+
+## Validation
+```{r}
+#| label: fig6-validation
+#| fig-width: 10
+#| fig-height: 10
+#| results: asis
+
+# Validation for reporting model m1 only: no_eggs ~ cage_id + (1|replicate), negative binomial
+validate_all_candidate_models(
+  m1 = m1,
+  section_labels = c(
+    m1 = "**negative binomial** (log link); `lme4::glmer.nb`; `no_eggs ~ cage_id + (1|replicate)`"
+  )
+)
+```
+
+## Output
+```{r}
+#| label: fig6-output
+
+# Model summary for Figure 6 (m_fig6 = m1)
+summary(m_fig6)
+```
+
+## Random effects
+```{r}
+#| label: fig6-random
+
+# Random effects for m_fig6 (replicate only)
+print(plot(ranef(m_fig6, condVar = TRUE)))
+```
+:::
+
+# Figures 7 & 8
+
+**Wrangling & Summary**
+
+```{r}
+#| label: fig7-8-wrangling
+
+# Read and prepare data for Figures 7 & 8
+df_f7_8 <- read_excel(here::here("analysis/data/Cages datasheet actual.xlsx"),
+                    sheet = "Adult mortality data") |>
+  janitor::clean_names() |>
+  select(cage_id2, no_died_male, no_died_female) |>
+  pivot_longer(
+    cols = c(no_died_male, no_died_female),
+    names_to = "sex",
+    values_to = "mortality"
+  ) |>
+  mutate(sex = case_when(
+    sex == "no_died_male" ~ "male",
+    sex == "no_died_female" ~ "female",
+    TRUE ~ NA_character_
+  )) |>
+  filter(!(is.na(mortality)))
+
+# Check data structure
+str(df_f7_8)
+```
+
+```{r}
+#| label: fig7-8-models-run
+#| include: false
+
+# Fit models for Figures 7 & 8 (runs before Effect plot tab; shown again under Models tab)
+# m1: cage only; m2: add sex; m3: cage × sex
+m1 <- glm(mortality ~ cage_id2, family = poisson(), data = df_f7_8)
+m2 <- glm(mortality ~ cage_id2 + sex, family = poisson(), data = df_f7_8)
+m3 <- glm(mortality ~ cage_id2 * sex, family = poisson(), data = df_f7_8)
+m_best <- pick_best_by_aicc(m1, m2, m3)
+```
+
+::: {.panel-tabset}
+## Effect plot
+```{r}
+#| label: fig7-8-effects
+#| fig-width: 5
+#| fig-height: 4
+#| dpi: 600
+
+# Generate and plot effects for Figures 7 & 8 (lowest AICc model)
+fig78_has_sex <- any(grepl("sex", attr(stats::terms(stats::formula(m_best)), "term.labels")))
+
+if (fig78_has_sex) {
+  eff <- as.data.frame(effects::Effect(c("cage_id2", "sex"), m_best))
+  p_fig78 <- ggplot() +
+    theme_classic() +
+    geom_point(
+      data = df_f7_8,
+      aes(x = cage_id2, y = mortality, color = sex),
+      alpha = 0.28,
+      position = position_jitter(width = 0.2, height = 0)
+    ) +
+    geom_point(
+      data = eff,
+      aes(x = cage_id2, y = fit, color = sex),
+      shape = 16,
+      size = 2,
+      position = position_dodge(0.5)
+    ) +
+    geom_errorbar(
+      data = eff,
+      aes(x = cage_id2, ymin = lower, ymax = upper, color = sex),
+      linewidth = 0.8,
+      width = 0.3,
+      position = position_dodge(width = 0.5)
+    ) +
+    scale_y_continuous(limits = c(0, 5)) +
+    scale_x_discrete(labels = c("KWT", "SIT", "CBC", "Control")) +
+    scale_color_brewer(palette = "Set1", labels = c("Female", "Male")) +
+    labs(
+      x = "Cage treatment",
+      y = expression("Number of dead "*italic(Nezara~viridula)),
+      color = "Sex"
+    ) +
+    theme(legend.position = "right")
+} else {
+  eff <- as.data.frame(effects::Effect("cage_id2", m_best))
+  p_fig78 <- ggplot() +
+    theme_classic() +
+    geom_point(
+      data = df_f7_8,
+      aes(x = cage_id2, y = mortality, color = sex),
+      alpha = 0.28,
+      position = position_jitter(width = 0.2, height = 0)
+    ) +
+    geom_point(data = eff, aes(x = cage_id2, y = fit), inherit.aes = FALSE, size = 2, shape = 16) +
+    geom_errorbar(
+      data = eff,
+      aes(x = cage_id2, ymin = lower, ymax = upper),
+      inherit.aes = FALSE,
+      linewidth = 0.8,
+      width = 0.25
+    ) +
+    scale_y_continuous(limits = c(0, 5)) +
+    scale_x_discrete(labels = c("KWT", "SIT", "CBC", "Control")) +
+    scale_color_brewer(palette = "Set1", labels = c("Female", "Male")) +
+    labs(
+      x = "Cage treatment",
+      y = expression("Number of dead "*italic(Nezara~viridula)),
+      color = "Sex",
+      subtitle = "Fitted means: cage effect only (no sex in selected model)"
+    ) +
+    theme(legend.position = "right")
+}
+
+ggsave(
+  filename = here::here("outputs/plots", "fig7-8.png"),
+  plot = p_fig78,
+  width = knitr::opts_current$get("fig.width"),
+  height = knitr::opts_current$get("fig.height"),
+  dpi = 600
+)
+p_fig78
+```
+
+### Modeled estimates and pairwise differences
+
+```{r}
+#| label: fig7-8-contrasts
+#| results: asis
+
+# Figures 7 & 8: modeled estimates (figure scale) and pairwise cage differences (response scale)
+fig78_has_sex <- any(grepl("sex", attr(stats::terms(stats::formula(m_best)), "term.labels")))
+knitr::asis_output('<div style="text-align:left;">\n')
+if (fig78_has_sex) {
+  eff_f78_tab <- as.data.frame(effects::Effect(c("cage_id2", "sex"), m_best))
+  print(kable_fig_modeled_estimates(eff_f78_tab, "cage_id2", sex_col = "sex", scale_pct = FALSE))
+  print(kable_cage_pairwise_response(
+    m_best,
+    "cage_id2",
+    "Marginal means are averaged equally over sex when comparing cages."
+  ))
+} else {
+  eff_f78_tab <- as.data.frame(effects::Effect("cage_id2", m_best))
+  print(kable_fig_modeled_estimates(eff_f78_tab, "cage_id2", scale_pct = FALSE))
+  print(kable_cage_pairwise_response(m_best, "cage_id2"))
+}
+knitr::asis_output('</div>\n')
+```
+
+## Models
+```{r}
+#| label: fig7-8-models
+#| eval: false
+
+# Fit models for Figures 7 & 8
+m1 <- glm(mortality ~ cage_id2, family = poisson(), data = df_f7_8)
+m2 <- glm(mortality ~ cage_id2 + sex, family = poisson(), data = df_f7_8)
+m3 <- glm(mortality ~ cage_id2 * sex, family = poisson(), data = df_f7_8)
+m_best <- pick_best_by_aicc(m1, m2, m3)
+
+# Model selection
+tab_f78 <- models_aicc_table_with_response(m1, m2, m3)
+print(kable_models_aicc_html(tab_f78))
+```
+
+```{r}
+#| label: fig7-8-models-output
+#| results: asis
+
+tab_f78 <- models_aicc_table_with_response(m1, m2, m3)
+print(kable_models_aicc_html(tab_f78))
+```
+
+## Validation
+```{r}
+#| label: fig7-8-validation
+#| fig-width: 10
+#| fig-height: 10
+#| results: asis
+
+# Model validation for Figures 7 & 8 (all candidate models)
+validate_all_candidate_models(m1 = m1, m2 = m2, m3 = m3)
+```
+
+## Output
+```{r}
+#| label: fig7-8-output
+
+# Model summary for Figures 7 & 8 (lowest AICc model)
+summary(m_best)
+```
+:::
+
+# Figure 9
+
+**Wrangling & Summary**
+
+```{r}
+#| label: fig9-wrangling
+
+# Read and prepare data for Figure 9
+df_f9a <- read_excel(here::here("analysis/data/Lincoln SIT alone.xlsx"),
+                    sheet = "Sheet1") |>
+  janitor::clean_names() |>
+  select(cross, percent_mortality) |>
+  mutate(cross = as.factor(cross)) |>
+  mutate(data = "Experiment") |>
+  filter(!(is.na(cross)))
+
+df_f9b <- read_excel(here::here("analysis/data/Model SIT alone.xlsx"),
+                    sheet = "Sheet1") |>
+  janitor::clean_names() |>
+  select(cross, percent_mortality) |>
+  mutate(cross = as.factor(cross)) |>
+  mutate(data = "Model") |>
+  filter(!(is.na(percent_mortality)))
+
+# Combine experimental and model data
+df_f9 <- rbind(df_f9a, df_f9b)
+rm(df_f9a, df_f9b)
+
+# Check data structure
+str(df_f9)
+```
+
+::: {.panel-tabset}
+## Plot 1
+```{r}
+#| label: fig9-plota
+#| fig-width: 5
+#| fig-height: 4
+#| dpi: 600
+
+# Create plot for Figure 9
+p_f9a <- ggplot(df_f9,
+       aes(x = cross, y = 1-percent_mortality, fill = data, color = data)) +
+  theme_classic() +
+  theme(legend.position = "bottom") +
+  geom_point(
+    alpha = 0.22,
+    position = position_jitterdodge(
+      jitter.width = 0.3,
+      jitter.height = 0,
+      dodge.width = 0.5
+    )
+  ) +
+  #scale_y_log10(labels = scales::percent_format(accuracy = 1)) +
+  scale_y_continuous(trans=scales::pseudo_log_trans(base = 10), labels = scales::percent_format(accuracy = 1)) +
+  scale_x_discrete(labels = c("0:1", "1:1", "4:1", "8:1")) +
+  scale_fill_manual(values = c("grey50", "black")) +
+  scale_color_manual(values = c("grey50", "black")) +
+  labs(x = "Overflooding ratio", y = "Percent F1 egg fertility", 
+       color = "Data", fill = "Data") +
+  facet_wrap(~data, nrow = 1)
+
+ggsave(
+  filename = here::here("outputs/plots", "fig9a.png"),
+  plot = p_f9a,
+  width = knitr::opts_current$get("fig.width"),
+  height = knitr::opts_current$get("fig.height"),
+  dpi = 600
+)
+p_f9a
+```
+
+## Models
+
+No statistical model is fitted in this figure; panels compare experimental and model outputs descriptively.
+
+## Plot 2
+```{r}
+#| label: fig9-plotb
+#| fig-width: 5
+#| fig-height: 4
+#| dpi: 600
+
+# Create plot for Figure 9
+p_f9b <- ggplot(df_f9,
+       aes(x = cross, y = percent_mortality, fill = data, color = data)) +
+  theme_classic() +
+  theme(legend.position = "bottom") +
+  geom_point(
+    alpha = 0.22,
+    position = position_jitterdodge(
+      jitter.width = 0.3,
+      jitter.height = 0,
+      dodge.width = 0.5
+    )
+  ) +
+  geom_boxplot(
+    aes(x = cross, y = percent_mortality),
+    alpha = 0.2,
+    position = position_dodge(width = 0.5)
+  ) +
+  
+  #scale_y_log10(labels = scales::percent_format(accuracy = 1)) +
+  scale_y_continuous(trans=scales::pseudo_log_trans(base = 10), labels = scales::percent_format(accuracy = 1)) +
+  scale_x_discrete(labels = c("0:1", "1:1", "4:1", "8:1")) +
+  scale_fill_manual(values = c("grey50", "black")) +
+  scale_color_manual(values = c("grey50", "black")) +
+  labs(x = "Overflooding ratio", y = "Percent F1 egg mortality", 
+       color = "Data", fill = "Data") +
+  facet_wrap(~data, nrow = 1)
+
+ggsave(
+  filename = here::here("outputs/plots", "fig9b.png"),
+  plot = p_f9b,
+  width = knitr::opts_current$get("fig.width"),
+  height = knitr::opts_current$get("fig.height"),
+  dpi = 600
+)
+p_f9b
+```
+## Plot 3
+```{r}
+#| label: fig9-plotc
+#| fig-width: 5
+#| fig-height: 4
+#| dpi: 600
+
+# Create plot for Figure 9
+p_f9c <- ggplot(df_f9,
+       aes(x = cross, y = percent_mortality, fill = data, color = data)) +
+  theme_classic() +
+  theme(legend.position = "bottom") +
+  geom_point(
+    alpha = 0.22,
+    position = position_jitterdodge(
+      jitter.width = 0.3,
+      jitter.height = 0,
+      dodge.width = 0.5
+    )
+  ) +
+  geom_boxplot(
+    aes(x = cross, y = percent_mortality),
+    alpha = 0.2,
+    position = position_dodge(width = 0.5)
+  ) +
+  # Add mean values as asterisks
+  stat_summary(
+    fun = mean,
+    geom = "point",
+    shape = 8,  # asterisk shape
+    size = 3,
+    color = "red",
+    position = position_dodge(width = 0.5),
+    show.legend = FALSE
+  ) +
+  scale_y_continuous(trans=scales::pseudo_log_trans(base = 10), labels = scales::percent_format(accuracy = 1)) +
+  scale_x_discrete(labels = c("0:1", "1:1", "4:1", "8:1")) +
+  scale_fill_manual(values = c("grey50", "black")) +
+  scale_color_manual(values = c("grey50", "black")) +
+  labs(x = "Overflooding ratio", y = "Percent F1 egg mortality", 
+       color = "Data", fill = "Data") +
+  facet_wrap(~data, nrow = 1)
+
+ggsave(
+  filename = here::here("outputs/plots", "fig9c.png"),
+  plot = p_f9c,
+  width = knitr::opts_current$get("fig.width"),
+  height = knitr::opts_current$get("fig.height"),
+  dpi = 600
+)
+p_f9c
+```
+## Plot 4
+```{r}
+#| label: fig9-plotd
+#| fig-width: 5
+#| fig-height: 4
+#| dpi: 600
+
+# Create plot for Figure 9
+p_f9d <- ggplot(df_f9,
+       aes(x = cross, y = percent_mortality, fill = data, color = data)) +
+  theme_classic() +
+  theme(legend.position = "bottom") +
+  geom_point(
+    alpha = 0.22,
+    position = position_jitterdodge(
+      jitter.width = 0.3,
+      jitter.height = 0,
+      dodge.width = 0.5
+    )
+  ) +
+  # geom_boxplot(
+  #   aes(x = cross, y = percent_mortality),
+  #   alpha = 0.2,
+  #   position = position_dodge(width = 0.5)
+  # ) +
+  # Add mean values as asterisks
+  stat_summary(
+    fun = mean,
+    geom = "point",
+    shape = 8,  # asterisk shape
+    size = 3,
+    color = "red",
+    position = position_dodge(width = 0.5),
+    show.legend = FALSE
+  ) +
+  scale_y_continuous(trans=scales::pseudo_log_trans(base = 10), labels = scales::percent_format(accuracy = 1)) +
+  scale_x_discrete(labels = c("0:1", "1:1", "4:1", "8:1")) +
+  scale_fill_manual(values = c("grey50", "black")) +
+  scale_color_manual(values = c("grey50", "black")) +
+  labs(x = "Overflooding ratio", y = "Percent F1 egg mortality", 
+       color = "Data", fill = "Data") +
+  facet_wrap(~data, nrow = 1)
+
+ggsave(
+  filename = here::here("outputs/plots", "fig9d.png"),
+  plot = p_f9d,
+  width = knitr::opts_current$get("fig.width"),
+  height = knitr::opts_current$get("fig.height"),
+  dpi = 600
+)
+p_f9d
+```
+:::
+
+# Figure 10
+
+**Wrangling & Summary**
+
+```{r}
+#| label: fig10-wrangling
+
+# Read and prepare data for Figure 10
+df_f10a <- read_excel(here::here("analysis/data/Lincoln Tbas alone.xlsx"),
+                    sheet = "Sheet1") |>
+  janitor::clean_names() |>
+  mutate(data = "Experiment")
+
+df_f10b <- read_excel(here::here("analysis/data/Model Tbas alone_Tbas longev update.xlsx"),
+                    sheet = "Sheet1") |>
+  janitor::clean_names() |>
+  select(ratio, percent_para) |>
+  mutate(data = "Model")
+
+# Combine experimental and model data
+df_f10 <- rbind(df_f10a, df_f10b) |>
+  mutate(ratio = as.factor(ratio),
+         data = as.factor(data)
+         )
+rm(df_f10a, df_f10b)
+
+# Check data structure
+str(df_f10)
+```
+
+::: {.panel-tabset}
+## Plot 1
+```{r}
+#| label: fig10-plota
+#| fig-width: 5
+#| fig-height: 4
+#| dpi: 600
+
+# Create plot for Figure 10
+p_f10a <- ggplot(df_f10,
+       aes(x = ratio, y = percent_para, fill = data, color = data)) +
+  theme_classic() +
+  theme(legend.position = "bottom") +
+  geom_point(
+    alpha = 0.22,
+    position = position_jitterdodge(
+      jitter.width = 0.3,
+      jitter.height = 0,
+      dodge.width = 0.5
+    )
+  ) +
+  scale_y_log10(trans=scales::pseudo_log_trans(base = 10), labels = scales::percent_format(accuracy = 1)) +
+  scale_x_discrete(labels = c("1:1", "1:2", "1:5")) +
+  scale_fill_manual(values = c("grey50", "black")) +
+  scale_color_manual(values = c("grey50", "black")) +
+  labs(x = "Overflooding ratio", y = "Percent parasitism", 
+       color = "Data", fill = "Data") +
+  facet_wrap(~data, nrow = 1)
+
+ggsave(
+  filename = here::here("outputs/plots", "fig10a.png"),
+  plot = p_f10a,
+  width = knitr::opts_current$get("fig.width"),
+  height = knitr::opts_current$get("fig.height"),
+  dpi = 600
+)
+p_f10a
+```
+
+## Models
+
+No statistical model is fitted in this figure; panels compare experimental and model outputs descriptively.
+
+## Plot 2
+```{r}
+#| label: fig10-plotb
+#| fig-width: 5
+#| fig-height: 4
+#| dpi: 600
+
+# Create plot for Figure 10
+p_f10b <- ggplot(df_f10,
+       aes(x = ratio, y = percent_para, fill = data, color = data)) +
+  theme_classic() +
+  theme(legend.position = "bottom") +
+  geom_point(
+    alpha = 0.22,
+    position = position_jitterdodge(
+      jitter.width = 0.3,
+      jitter.height = 0,
+      dodge.width = 0.5
+    )
+  ) +
+    geom_boxplot(
+    aes(x = ratio, y = percent_para),
+    alpha = 0.2,
+    position = position_dodge(width = 0.5)
+  ) +
+  scale_y_log10(trans=scales::pseudo_log_trans(base = 10), labels = scales::percent_format(accuracy = 1)) +
+  scale_x_discrete(labels = c("1:1", "1:2", "1:5")) +
+  scale_fill_manual(values = c("grey50", "black")) +
+  scale_color_manual(values = c("grey50", "black")) +
+  labs(x = "Overflooding ratio", y = "Percent parasitism", 
+       color = "Data", fill = "Data") +
+  facet_wrap(~data, nrow = 1)
+
+ggsave(
+  filename = here::here("outputs/plots", "fig10b.png"),
+  plot = p_f10b,
+  width = knitr::opts_current$get("fig.width"),
+  height = knitr::opts_current$get("fig.height"),
+  dpi = 600
+)
+p_f10b
+```
+## Plot 3
+```{r}
+#| label: fig10-plotc
+#| fig-width: 5
+#| fig-height: 4
+#| dpi: 600
+
+# Create plot for Figure 10
+p_f10c <- ggplot(df_f10,
+       aes(x = ratio, y = percent_para, fill = data, color = data)) +
+  theme_classic() +
+  theme(legend.position = "bottom") +
+  geom_point(
+    alpha = 0.22,
+    position = position_jitterdodge(
+      jitter.width = 0.3,
+      jitter.height = 0,
+      dodge.width = 0.5
+    )
+  ) +
+  geom_boxplot(
+    aes(x = ratio, y = percent_para),
+    alpha = 0.2,
+    position = position_dodge(width = 0.5)
+  ) +
+  # Add mean values as asterisks
+  stat_summary(
+    fun = mean,
+    geom = "point",
+    shape = 8,  # asterisk shape
+    size = 3,
+    color = "red",
+    position = position_dodge(width = 0.5),
+    show.legend = FALSE
+  ) +
+  scale_y_log10(trans=scales::pseudo_log_trans(base = 10), labels = scales::percent_format(accuracy = 1)) +
+  scale_x_discrete(labels = c("1:1", "1:2", "1:5")) +
+  scale_fill_manual(values = c("grey50", "black")) +
+  scale_color_manual(values = c("grey50", "black")) +
+  labs(x = "Overflooding ratio", y = "Percent parasitism", 
+       color = "Data", fill = "Data") +
+  facet_wrap(~data, nrow = 1)
+
+ggsave(
+  filename = here::here("outputs/plots", "fig10c.png"),
+  plot = p_f10c,
+  width = knitr::opts_current$get("fig.width"),
+  height = knitr::opts_current$get("fig.height"),
+  dpi = 600
+)
+p_f10c
+```
+
+## Plot 4
+```{r}
+#| label: fig10-plotd
+#| fig-width: 5
+#| fig-height: 4
+#| dpi: 600
+
+# Create plot for Figure 10
+p_f10d <- ggplot(df_f10,
+       aes(x = ratio, y = percent_para, fill = data, color = data)) +
+  theme_classic() +
+  theme(legend.position = "bottom") +
+  geom_point(
+    alpha = 0.22,
+    position = position_jitterdodge(
+      jitter.width = 0.3,
+      jitter.height = 0,
+      dodge.width = 0.5
+    )
+  ) +
+  # geom_boxplot(
+  #   aes(x = ratio, y = percent_para),
+  #   alpha = 0.2,
+  #   position = position_dodge(width = 0.5)
+  # ) +
+  # Add mean values as asterisks
+  stat_summary(
+    fun = mean,
+    geom = "point",
+    shape = 8,  # asterisk shape
+    size = 3,
+    color = "red",
+    position = position_dodge(width = 0.5),
+    show.legend = FALSE
+  ) +
+  scale_y_log10(trans=scales::pseudo_log_trans(base = 10), labels = scales::percent_format(accuracy = 1)) +
+  scale_x_discrete(labels = c("1:1", "1:2", "1:5")) +
+  scale_fill_manual(values = c("grey50", "black")) +
+  scale_color_manual(values = c("grey50", "black")) +
+  labs(x = "Overflooding ratio", y = "Percent parasitism", 
+       color = "Data", fill = "Data") +
+  facet_wrap(~data, nrow = 1)
+
+ggsave(
+  filename = here::here("outputs/plots", "fig10d.png"),
+  plot = p_f10d,
+  width = knitr::opts_current$get("fig.width"),
+  height = knitr::opts_current$get("fig.height"),
+  dpi = 600
+)
+p_f10d
+```
+:::
+
+# References
+
+R Core Team (2022). R: A language and environment for statistical computing. R Foundation for Statistical Computing, Vienna, Austria. <https://www.R-project.org/>
+
+Burnham, K. P., & Anderson, D. R. (2002). *Model selection and multimodel inference: A practical information-theoretic approach* (2nd ed.). Springer. (AICc / model selection.)
+
+Fox, J., & Weisberg, S. (2019). *An R companion to applied regression* (3rd ed.). Sage.
+
+Lenth, R. V. (2024). emmeans: Estimated marginal means, aka least-squares means. *Journal of Statistical Software*, 109(1), 1–48. <https://doi.org/10.18637/jss.v109.i01> (R package: <https://CRAN.R-project.org/package=emmeans>.)
+
+Lüdecke, D., Ben-Shachar, M. S., Patil, I., Waggoner, P., & Makowski, D. (2021). performance: An R package for assessment, comparison and testing of statistical models. *Journal of Open Source Software*, 6(60), 3139. <https://doi.org/10.21105/joss.03139>
+
+Wickham, H. (2016). *ggplot2: Elegant graphics for data analysis*. Springer-Verlag. <https://ggplot2-book.org/>
+
+Tukey, J. W. (1949). Comparing individual means in the analysis of variance. *Biometrics*, 5(2), 99–114. <https://doi.org/10.2307/3001913> (Tukey’s HSD / pairwise comparisons.)
+
+::: {.callout-note collapse="true"}
+## Session Information
+
+```{r}
+#| label: session-info
+utils::sessionInfo()
+```
+:::

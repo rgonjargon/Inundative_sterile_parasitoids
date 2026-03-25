@@ -1,0 +1,23 @@
+# R
+.Rhistory
+.RData
+.here
+.Rproj.user
+*.Rproj.user/
+
+# Data and generated outputs (per project rules)
+analysis/data/
+
+# Quarto render artifacts
+scripts/*_files/
+scripts/*.html
+!scripts/1_analysis.html
+
+# Local env and secrets (do not commit)
+.env
+.env.local
+
+# OS
+.DS_Store
+._*
+Thumbs.db
