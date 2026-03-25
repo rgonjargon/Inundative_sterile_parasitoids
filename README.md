@@ -1,18 +1,16 @@
-# Kiran Fruit Flies — Manuscript Analysis
+# Inundative sterile parasitoids
 
-R + Quarto project: statistical analysis and figures for the fruit fly manuscript.
+R + Quarto project: statistical analyses and manuscript figures for *Modelling the impact of inundative sterile parasitoids and SIT as a novel combination for insect pest eradication* (supporting information).
 
 ## Folder structure
 
 ```text
 ├── analysis/           # Data and pipeline outputs
-│   ├── data/           # Raw spreadsheets (git-ignored)
-│   └── output/         # Generated outputs (e.g. models; git-ignored)
+│   └── data/           # Raw spreadsheets (git-ignored)
 ├── outputs/            # Manuscript-ready exports
 │   └── plots/          # Figures (600 DPI in Quarto YAML)
 ├── scripts/            # Source reports
 │   └── 1_analysis.qmd  # Main analysis (Quarto)
-├── .here               # Optional local marker for the here package (git-ignored)
 ├── .gitignore
 └── project.Rproj
 ```
@@ -20,7 +18,7 @@ R + Quarto project: statistical analysis and figures for the fruit fly manuscrip
 ## Quick start
 
 ```bash
-cd Kiran_Fruit_Flies
+cd Inundative_sterile_parasitoids
 quarto render scripts/1_analysis.qmd
 open scripts/1_analysis.html
 ```
