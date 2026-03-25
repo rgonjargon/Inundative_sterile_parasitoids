@@ -2,6 +2,10 @@
 
 R + Quarto project: statistical analyses and manuscript figures for *Modelling the impact of inundative sterile parasitoids and SIT as a novel combination for insect pest eradication* (supporting information).
 
+## Authors
+
+Kiran Jonathan Horrocks<sup>1,2,*</sup>, Adriana Najar-Rodriguez<sup>3</sup>, Rachael Horner<sup>3</sup>, Gonzalo Andres Avila<sup>2,4</sup>, Gregory Ian Holwell<sup>1</sup>, David Maxwell Suckling<sup>1,3,4,+</sup>, Thomas Peter Moore<sup>3</sup>, Lloyd Damien Stringer<sup>3,4</sup>
+
 ## Folder structure
 
 ```text
