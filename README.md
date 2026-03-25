@@ -14,7 +14,7 @@ R + Quarto project: statistical analysis and figures for the fruit fly manuscrip
 │   └── 1_analysis.qmd  # Main analysis (Quarto)
 ├── .here               # Optional local marker for the here package (git-ignored)
 ├── .gitignore
-└── Kiran_Fruit_Flies.Rproj
+└── project.Rproj
 ```
 
 ## Quick start
@@ -30,13 +30,6 @@ open scripts/1_analysis.html
 - **R** (recent 4.x)
 - **Quarto** (`quarto --version` must succeed)
 - **R packages** — the document installs missing packages via `ipak()` on render (see the setup chunk in `scripts/1_analysis.qmd`)
-- **CmdStan** (for **brms** / **cmdstanr**) — the analysis sets a default path suitable for the cluster layout. On other machines, set the path before rendering, for example in R:
-
-  ```r
-  cmdstanr::set_cmdstan_path("/path/to/cmdstan")
-  ```
-
-  Or set the environment variable `CMDSTAN_PATH` to your CmdStan directory.
 
 ## Reproducibility
 
